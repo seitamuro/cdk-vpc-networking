@@ -8,7 +8,8 @@ export class CdkVpcNetworkingStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    const peerVpc = new ec2.Vpc(this, "PeerVpc", {
+    // VPCの作成
+    const peerVpc = new ec2.Vpc(this, "MyPeerVpc", {
       cidr: "10.101.0.0/16",
       enableDnsHostnames: true,
       enableDnsSupport: true,
@@ -22,8 +23,8 @@ export class CdkVpcNetworkingStack extends cdk.Stack {
         },
       ],
     });
-    const vpc = new ec2.Vpc(this, "VPC", {
-      ipAddresses: ec2.IpAddresses.cidr("10.0.0.0/16"),
+    const vpc = new ec2.Vpc(this, "MyVPC", {
+      ipAddresses: ec2.IpAddresses.cidr("10.102.0.0/16"),
       enableDnsHostnames: true,
       enableDnsSupport: true,
       maxAzs: 2,
@@ -34,13 +35,47 @@ export class CdkVpcNetworkingStack extends cdk.Stack {
           cidrMask: 24,
           reserved: false,
         },
+        {
+          name: "PrivateSubnet",
+          subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
+          cidrMask: 24,
+          reserved: false,
+        },
       ],
     });
 
+    // VPCピアリング
+    const vpcPeeringConnection = new ec2.CfnVPCPeeringConnection(
+      this,
+      "VpcPeeringConnection",
+      {
+        vpcId: vpc.vpcId,
+        peerVpcId: peerVpc.vpcId,
+      }
+    );
+
+    // 各VPCのサブネットのルートテーブルにピアリング接続を追加
+    peerVpc.publicSubnets.map((iSubnet: ec2.ISubnet, index: number) => {
+      new ec2.CfnRoute(this, `PeerVpcRoute${index}`, {
+        routeTableId: iSubnet.routeTable.routeTableId,
+        destinationCidrBlock: vpc.vpcCidrBlock,
+        vpcPeeringConnectionId: vpcPeeringConnection.ref,
+      });
+    });
+    vpc.publicSubnets.map((iSubnet: ec2.ISubnet, index: number) => {
+      new ec2.CfnRoute(this, `VpcRoute${index}`, {
+        routeTableId: iSubnet.routeTable.routeTableId,
+        destinationCidrBlock: peerVpc.vpcCidrBlock,
+        vpcPeeringConnectionId: vpcPeeringConnection.ref,
+      });
+    });
+
+    // EC2インスタンスの作成
     const securityGroup = new ec2.SecurityGroup(this, "SampleSecurityGroup", {
       vpc,
       securityGroupName: "cdk-vpc-ec2-security-group",
     });
+    securityGroup.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.allIcmp());
 
     const instanceRole = new iam.Role(this, "SampleInstanceRole", {
       assumedBy: new iam.ServicePrincipal("ec2.amazonaws.com"),
@@ -66,18 +101,21 @@ export class CdkVpcNetworkingStack extends cdk.Stack {
       this,
       "SampleInstance2",
       "cdk-vpc-ec2-instance2",
-      vpc,
-      vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }),
+      peerVpc,
+      vpc.selectSubnets({ subnetType: ec2.SubnetType.PUBLIC }),
       securityGroup,
       instanceRole
     );
 
-    new cdk.CfnOutput(this, "VPC", { value: vpc.vpcId });
-    new cdk.CfnOutput(this, "SecurityGroup", {
-      value: securityGroup.securityGroupId,
-    });
-    new cdk.CfnOutput(this, "EC2Instance1", { value: instance1.instanceId });
-    new cdk.CfnOutput(this, "EC2Instance2", { value: instance2.instanceId });
+    const instance3 = createInstance(
+      this,
+      "SampleInstance3",
+      "cdk-vpc-ec2-instance3",
+      vpc,
+      vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_ISOLATED }),
+      securityGroup,
+      instanceRole
+    );
   }
 }
 
